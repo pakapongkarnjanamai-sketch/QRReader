@@ -56,7 +56,8 @@ namespace QRReader
         private void InitializeControls()
         {
             this.Size = new Size(1200, 800);
-            this.Text = "PDFScout - PDF Content Scanner";
+            this.Text = "QR Reader - PDF Content Scanner ";
+            //this.Text = "PDFScout - PDF Content Scanner";
 
             // Status Strip
             statusStrip = new StatusStrip();
