@@ -1,7 +1,6 @@
 ﻿using DevExpress.Pdf;
-using DevExpress.XtraPdfViewer;
-using DevExpress.XtraGrid;
 using DevExpress.XtraGrid.Views.Grid;
+using DevExpress.XtraPdfViewer;
 using System.Runtime.InteropServices;
 using ZXing;
 using ZXing.Common;
@@ -9,7 +8,6 @@ using Button = System.Windows.Forms.Button;
 using Point = System.Drawing.Point;
 using RadioButton = System.Windows.Forms.RadioButton;
 using Size = System.Drawing.Size;
-using DevExpress.XtraEditors;
 
 namespace QRReader
 
@@ -19,7 +17,6 @@ namespace QRReader
         private string currentPdfPath;
         private TextBox txtPdfPath;
         private Button btnBrowse;
-        private Button btnScan;
         private DevExpress.XtraGrid.GridControl gridResults;
         private DevExpress.XtraGrid.Views.Grid.GridView gridView;
         private TextBox txtSearch;
@@ -110,8 +107,7 @@ namespace QRReader
                 Caption = "No",
                 Visible = true,
                 Width = 50,
-                VisibleIndex = 0, // ให้แสดงเป็นคอลัมน์แรก
-                //TextAlignment = DevExpress.Utils.HorzAlignment.Center
+                VisibleIndex = 0, 
             });
             // สร้างคอลัมน์
             gridView.Columns.Add(new DevExpress.XtraGrid.Columns.GridColumn
