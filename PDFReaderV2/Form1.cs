@@ -375,6 +375,13 @@ namespace PDFReaderV2
                     TryInverted = true
                 };
 
+                // Pre-compile regex and pre-group numeric words by page for fast lookup
+                var numericRegex = new Regex(@"^\d+$", RegexOptions.Compiled);
+                var wordsByPage = allWords
+                    .Where(w => numericRegex.IsMatch(w.Text))
+                    .GroupBy(w => w.PageNumber)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
                 _stepText = "Scanning page";
                 _scanStopwatch = Stopwatch.StartNew();
 
@@ -387,9 +394,8 @@ namespace PDFReaderV2
                     double pageHeight = pdfPage.CropBox.Height;
                     double pageWidth = pdfPage.CropBox.Width;
 
-                    var pageWords = allWords
-                        .Where(w => w.PageNumber == page && Regex.IsMatch(w.Text, @"^\d+$"))
-                        .ToList();
+                    wordsByPage.TryGetValue(page, out var pageWords);
+                    pageWords ??= [];
 
                     bool foundNewOnThisPage = false;
 
@@ -440,7 +446,7 @@ namespace PDFReaderV2
                             }
                         }
 
-                        // Grid-based fallback scan
+                        // Grid-based fallback scan (only when full-page found too few)
                         if (foundOnPage < 56)
                         {
                             int gridRows = 8;
