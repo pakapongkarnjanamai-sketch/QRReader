@@ -4,6 +4,7 @@ using DevExpress.XtraPdfViewer;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using System.Threading;
 using ZXing;
 using ZXing.Common;
 using Button = System.Windows.Forms.Button;
@@ -18,6 +19,7 @@ namespace PDFReaderV2
         private TextBox txtPdfPath;
         private Button btnBrowse;
         private Button btnProcess;
+        private Button btnPause;
         private DevExpress.XtraGrid.GridControl gridResults;
         private DevExpress.XtraGrid.Views.Grid.GridView gridView;
         private PdfViewer pdfViewer;
@@ -26,6 +28,9 @@ namespace PDFReaderV2
         private MenuStrip menuStrip;
         private DevExpress.XtraEditors.SplitContainerControl splitContainer;
         private HashSet<string> scannedQRCodes = new();
+        private ManualResetEventSlim _pauseEvent = new(true);
+        private bool _isPaused;
+        private string _lastStatusText = "";
 
         public Form1()
         {
@@ -67,6 +72,15 @@ namespace PDFReaderV2
                 Location = new Point(460, 39),
                 Text = "Process",
                 Width = 80,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left
+            };
+
+            btnPause = new Button
+            {
+                Location = new Point(550, 39),
+                Text = "Pause",
+                Width = 80,
+                Enabled = false,
                 Anchor = AnchorStyles.Top | AnchorStyles.Left
             };
 
@@ -137,7 +151,7 @@ namespace PDFReaderV2
             splitContainer.Panel2.Controls.Add(pdfViewer);
 
             this.Controls.AddRange(new Control[] {
-                txtPdfPath, btnBrowse, btnProcess,
+                txtPdfPath, btnBrowse, btnProcess, btnPause,
                 splitContainer,
                 statusStrip
             });
@@ -147,7 +161,34 @@ namespace PDFReaderV2
         {
             btnBrowse.Click += BtnBrowse_Click;
             btnProcess.Click += BtnProcess_Click;
+            btnPause.Click += BtnPause_Click;
             gridView.RowClick += GridView_RowClick;
+        }
+
+        private void SetProcessingMode(bool isProcessing)
+        {
+            btnBrowse.Enabled = !isProcessing;
+            btnProcess.Enabled = !isProcessing;
+            btnPause.Enabled = isProcessing;
+            menuStrip.Enabled = !isProcessing;
+        }
+
+        private void BtnPause_Click(object? sender, EventArgs e)
+        {
+            if (_isPaused)
+            {
+                _isPaused = false;
+                _pauseEvent.Set();
+                btnPause.Text = "Pause";
+                statusLabel.Text = _lastStatusText;
+            }
+            else
+            {
+                _isPaused = true;
+                _pauseEvent.Reset();
+                btnPause.Text = "Resume";
+                statusLabel.Text = $"PAUSED | {_lastStatusText}";
+            }
         }
 
         private void BtnBrowse_Click(object? sender, EventArgs e)
@@ -185,7 +226,10 @@ namespace PDFReaderV2
                 return;
             }
 
-            btnProcess.Enabled = false;
+            SetProcessingMode(true);
+            _isPaused = false;
+            _pauseEvent.Set();
+            btnPause.Text = "Pause";
             scannedQRCodes.Clear();
             gridResults.DataSource = null;
             statusLabel.Text = "Processing...";
@@ -214,7 +258,7 @@ namespace PDFReaderV2
             }
             finally
             {
-                btnProcess.Enabled = true;
+                SetProcessingMode(false);
             }
         }
 
@@ -246,18 +290,32 @@ namespace PDFReaderV2
             return words;
         }
 
+        private void UpdateStatus(string text)
+        {
+            _lastStatusText = text;
+            if (!_isPaused)
+                statusLabel.Text = text;
+        }
+
         private async Task<List<ScanResult>> ScanQRCodeWithLabels(Stopwatch stopwatch)
         {
             var results = new List<ScanResult>();
 
             await Task.Run(() =>
             {
+                // Step 1: Load document
+                this.Invoke((MethodInvoker)delegate { UpdateStatus("Loading PDF document..."); });
+
                 using var processor = new PdfDocumentProcessor();
                 processor.LoadDocument(currentPdfPath!);
-
-                var allWords = ExtractAllWords(processor);
                 int totalPages = processor.Document.Pages.Count;
 
+                // Step 2: Extract text
+                this.Invoke((MethodInvoker)delegate { UpdateStatus($"Extracting text from {totalPages} pages..."); });
+
+                var allWords = ExtractAllWords(processor);
+
+                // Step 3: Prepare barcode reader
                 var reader = new BarcodeReader<Bitmap>(
                     (bitmap) =>
                     {
@@ -287,8 +345,24 @@ namespace PDFReaderV2
                     TryInverted = true
                 };
 
+                // Step 4: Scan pages
                 for (int page = 1; page <= totalPages; page++)
                 {
+                    // Pause check
+                    _pauseEvent.Wait();
+
+                    int currentPage = page;
+                    int pct = (int)((double)currentPage / totalPages * 100);
+                    double elapsed = stopwatch.Elapsed.TotalSeconds;
+                    double avgPerPage = elapsed / currentPage;
+                    double eta = avgPerPage * (totalPages - currentPage);
+                    string timeInfo = $"Elapsed: {FormatTime(elapsed)} | ETA: {FormatTime(eta)}";
+
+                    this.Invoke((MethodInvoker)delegate
+                    {
+                        UpdateStatus($"Scanning page {currentPage} / {totalPages} ({pct}%) | {timeInfo}");
+                    });
+
                     var pdfPage = processor.Document.Pages[page - 1];
                     double pageHeight = pdfPage.CropBox.Height;
                     double pageWidth = pdfPage.CropBox.Width;
@@ -298,7 +372,6 @@ namespace PDFReaderV2
                         .ToList();
 
                     bool foundNewOnThisPage = false;
-                    int currentPage = page;
 
                     using (var originalImage = processor.CreateBitmap(page, 2400))
                     {
@@ -403,10 +476,9 @@ namespace PDFReaderV2
                     } // bitmap disposed here
 
                     // Update progress & grid
-                    double elapsed = stopwatch.Elapsed.TotalSeconds;
-                    double avgPerPage = elapsed / currentPage;
-                    int remaining = totalPages - currentPage;
-                    double eta = avgPerPage * remaining;
+                    elapsed = stopwatch.Elapsed.TotalSeconds;
+                    avgPerPage = elapsed / currentPage;
+                    eta = avgPerPage * (totalPages - currentPage);
                     bool updateGrid = foundNewOnThisPage;
                     int foundCount = scannedQRCodes.Count;
 
@@ -420,9 +492,11 @@ namespace PDFReaderV2
                                 .Select((r, idx) => new { No = idx + 1, r.Page, r.QRContent, r.Label })
                                 .ToList<object>();
                             gridResults.DataSource = sorted;
+                            gridView.FocusedRowHandle = gridView.DataRowCount - 1;
+                            gridView.MakeRowVisible(gridView.FocusedRowHandle);
                         }
 
-                        statusLabel.Text = $"Scanning {currentPage} / {totalPages} ({(int)((double)currentPage / totalPages * 100)}%) | Found: {foundCount} QR codes | Elapsed: {FormatTime(elapsed)} | ETA: {FormatTime(eta)}";
+                        UpdateStatus($"Page {currentPage} / {totalPages} ({pct}%) | Found: {foundCount} QR codes | Elapsed: {FormatTime(elapsed)} | ETA: {FormatTime(eta)}");
                     });
                 }
             });
