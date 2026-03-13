@@ -1,6 +1,7 @@
 using DevExpress.Pdf;
 using DevExpress.XtraGrid.Views.Grid;
 using DevExpress.XtraPdfViewer;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -28,6 +29,15 @@ namespace PDFReaderV2
         private MenuStrip menuStrip;
         private DevExpress.XtraEditors.SplitContainerControl splitContainer;
         private HashSet<string> scannedQRCodes = new();
+        private BindingList<DisplayRow> _gridData = new();
+
+        private class DisplayRow
+        {
+            public int No { get; set; }
+            public int Page { get; set; }
+            public string QRContent { get; set; } = "";
+            public string Label { get; set; } = "";
+        }
         private ManualResetEventSlim _pauseEvent = new(true);
         private bool _isPaused;
         private volatile string _stepText = "";
@@ -267,7 +277,8 @@ namespace PDFReaderV2
             _totalPages = 0;
             _stepText = "Starting...";
             _etaText = "calculating...";
-            gridResults.DataSource = null;
+            _gridData = new BindingList<DisplayRow>();
+            gridResults.DataSource = _gridData;
             statusLabel.Text = "Starting...";
 
             _stopwatch = Stopwatch.StartNew();
@@ -275,19 +286,11 @@ namespace PDFReaderV2
 
             try
             {
-                var results = await ScanQRCodeWithLabels();
+                await ScanQRCodeWithLabels();
                 _stopwatch.Stop();
                 _statusTimer.Stop();
 
-                // Final sort and re-number
-                var sorted = results
-                    .OrderBy(r => r.Page)
-                    .ThenBy(r => r.QRContent)
-                    .Select((r, idx) => new { No = idx + 1, r.Page, r.QRContent, r.Label })
-                    .ToList<object>();
-
-                gridResults.DataSource = sorted;
-                statusLabel.Text = $"Scan completed. Found {sorted.Count} results. Time: {FormatTime(_stopwatch.Elapsed.TotalSeconds)}";
+                statusLabel.Text = $"Scan completed. Found {_gridData.Count} results. Time: {FormatTime(_stopwatch.Elapsed.TotalSeconds)}";
             }
             catch (Exception ex)
             {
@@ -331,10 +334,8 @@ namespace PDFReaderV2
             return words;
         }
 
-        private async Task<List<ScanResult>> ScanQRCodeWithLabels()
+        private async Task ScanQRCodeWithLabels()
         {
-            var results = new List<ScanResult>();
-
             await Task.Run(() =>
             {
                 _stepText = "Loading PDF document...";
@@ -397,8 +398,6 @@ namespace PDFReaderV2
                     wordsByPage.TryGetValue(page, out var pageWords);
                     pageWords ??= [];
 
-                    bool foundNewOnThisPage = false;
-
                     using (var originalImage = processor.CreateBitmap(page, 2400))
                     {
                         double scaleX = originalImage.Width / pageWidth;
@@ -440,9 +439,8 @@ namespace PDFReaderV2
                                         cellPdfLeft, cellPdfTop, cellPdfRight, cellPdfBottom);
                                 }
 
-                                results.Add(new ScanResult(page, qrText, labelText));
+                                AddRowToGrid(page, qrText, labelText);
                                 foundOnPage++;
-                                foundNewOnThisPage = true;
                             }
                         }
 
@@ -491,8 +489,7 @@ namespace PDFReaderV2
                                             string labelText = FindLabelInCell(pageWords,
                                                 cellPdfLeft, cellPdfTop, cellPdfRight, cellPdfBottom);
 
-                                            results.Add(new ScanResult(page, result.Text, labelText));
-                                            foundNewOnThisPage = true;
+                                            AddRowToGrid(page, result.Text, labelText);
                                         }
                                     }
                                 }
@@ -507,26 +504,24 @@ namespace PDFReaderV2
                     double eta = avgPerPage * remaining;
                     _etaText = FormatTime(eta);
                     _avgPerPageText = $"{avgPerPage:F1}s";
-
-                    // Update grid on UI thread (only when new data found)
-                    if (foundNewOnThisPage)
-                    {
-                        this.Invoke((MethodInvoker)delegate
-                        {
-                            var sorted = results
-                                .OrderBy(r => r.Page)
-                                .ThenBy(r => r.QRContent)
-                                .Select((r, idx) => new { No = idx + 1, r.Page, r.QRContent, r.Label })
-                                .ToList<object>();
-                            gridResults.DataSource = sorted;
-                            gridView.FocusedRowHandle = gridView.DataRowCount - 1;
-                            gridView.MakeRowVisible(gridView.FocusedRowHandle);
-                        });
-                    }
                 }
             });
+        }
 
-            return results;
+        private void AddRowToGrid(int page, string qrContent, string label)
+        {
+            this.Invoke((MethodInvoker)delegate
+            {
+                _gridData.Add(new DisplayRow
+                {
+                    No = _gridData.Count + 1,
+                    Page = page,
+                    QRContent = qrContent,
+                    Label = label
+                });
+                gridView.FocusedRowHandle = gridView.DataRowCount - 1;
+                gridView.MakeRowVisible(gridView.FocusedRowHandle);
+            });
         }
 
         private string FindLabelInCell(List<WordInfo> pageWords,
