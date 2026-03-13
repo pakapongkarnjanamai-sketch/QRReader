@@ -1,4 +1,5 @@
 using DevExpress.Pdf;
+using DevExpress.Pdf;
 using PDFReaderV2.Interfaces;
 using PDFReaderV2.Models;
 
@@ -23,6 +24,13 @@ public class PdfTextExtractor : IPdfTextExtractor
     public static List<WordInfo> ExtractWords(PdfDocumentProcessor processor)
     {
         var words = new List<WordInfo>();
+        var pageHeights = new Dictionary<int, double>();
+        foreach (var page in processor.Document.Pages)
+        {
+            int pageNum = processor.Document.Pages.IndexOf(page) + 1;
+            pageHeights[pageNum] = page.CropBox.Height;
+        }
+
         PdfPageWord currentWord = processor.NextWord();
         while (currentWord != null)
         {
@@ -30,11 +38,18 @@ public class PdfTextExtractor : IPdfTextExtractor
             if (currentWord.Rectangles.Count > 0)
             {
                 var rect = currentWord.Rectangles[0];
+                double pgHeight = pageHeights.GetValueOrDefault(currentWord.PageNumber);
+
+                // Convert from page coordinates (Y increases upward, origin bottom-left)
+                // to top-down coordinates (Y increases downward, origin top-left)
+                // so that WordInfo.Top matches bitmap/image coordinate direction.
+                double topDown = pgHeight - rect.Top;
+
                 words.Add(new WordInfo(
                     wordText,
                     currentWord.PageNumber,
                     rect.Left,
-                    rect.Top,
+                    topDown,
                     rect.Width,
                     rect.Height
                 ));

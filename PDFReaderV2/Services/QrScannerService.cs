@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -7,13 +9,17 @@ using DevExpress.Pdf;
 using PDFReaderV2.Helpers;
 using PDFReaderV2.Interfaces;
 using PDFReaderV2.Models;
-using ZXing;
-using ZXing.Common;
+using ZXingCpp;
 
 namespace PDFReaderV2.Services;
 
 public class QrScannerService : IQrScannerService
 {
+    private const int GridRows = 8;
+    private const int GridCols = 7;
+    private const int RenderSize = 2400;
+    private static readonly Regex NumericOnly = new(@"^\d+$", RegexOptions.Compiled);
+
     private readonly ILabelFinder _labelFinder;
 
     public QrScannerService(ILabelFinder labelFinder)
@@ -29,7 +35,7 @@ public class QrScannerService : IQrScannerService
         CancellationToken cancellationToken)
     {
         var progress = new ScanProgress();
-        var scannedQRCodes = new HashSet<string>();
+        var scannedQRCodes = new ConcurrentDictionary<string, byte>();
 
         await Task.Run(() =>
         {
@@ -44,8 +50,6 @@ public class QrScannerService : IQrScannerService
             onProgressChanged(progress);
 
             var allWords = PdfTextExtractor.ExtractWords(processor);
-
-            var reader = CreateBarcodeReader();
 
             var numericRegex = new Regex(@"^\d+$", RegexOptions.Compiled);
             var wordsByPage = allWords
@@ -70,35 +74,72 @@ public class QrScannerService : IQrScannerService
                 wordsByPage.TryGetValue(page, out var pageWords);
                 pageWords ??= [];
 
-                using (var originalImage = processor.CreateBitmap(page, 2400))
+                var swRender = Stopwatch.StartNew();
+                using var originalImage = processor.CreateBitmap(page, RenderSize);
+                swRender.Stop();
+
+                double scaleX = originalImage.Width / pageWidth;
+                double scaleY = originalImage.Height / pageHeight;
+
+                var swDecode = Stopwatch.StartNew();
+
+                // Full-page decode with ZXingCpp (native C++, 10-50x faster than ZXing.Net)
+                var barcodes = ReadBarcodesFromBitmap(originalImage);
+
+                int foundOnPage = 0;
+                foreach (var barcode in barcodes)
                 {
-                    double scaleX = originalImage.Width / pageWidth;
-                    double scaleY = originalImage.Height / pageHeight;
+                    string qrText = barcode.Text?.Trim()!;
+                    if (string.IsNullOrEmpty(qrText) || !barcode.IsValid
+                        || NumericOnly.IsMatch(qrText))
+                        continue;
 
-                    int foundOnPage = 0;
-
-                    var qrResults = reader.DecodeMultiple(originalImage);
-                    if (qrResults != null)
+                    if (scannedQRCodes.TryAdd(qrText, 0))
                     {
-                        foreach (var qrResult in qrResults)
+                        string labelText = FindLabelFromBarcode(barcode, scaleX, scaleY, pageWords);
+                        onResultFound(new ScanResult(page, qrText, labelText));
+                    }
+                    foundOnPage++;
+                }
+
+                // Parallel grid fallback for missed QR codes
+                if (foundOnPage < 56)
+                {
+                    var cells = PrepareCells(originalImage);
+
+                    Parallel.ForEach(cells, new ParallelOptions
+                    {
+                        MaxDegreeOfParallelism = Environment.ProcessorCount,
+                        CancellationToken = cancellationToken
+                    },
+                    (cell) =>
+                    {
+                        var cellResults = ReadBarcodesFromBitmap(cell.Bitmap);
+                        foreach (var result in cellResults)
                         {
-                            string qrText = qrResult.Text;
-                            if (string.IsNullOrEmpty(qrText) || !scannedQRCodes.Add(qrText))
+                            string? text = result.Text?.Trim();
+                            if (string.IsNullOrEmpty(text) || !result.IsValid
+                                || NumericOnly.IsMatch(text))
                                 continue;
 
-                            string labelText = FindLabelFromQrResult(qrResult, scaleX, scaleY, pageWords);
+                            if (scannedQRCodes.TryAdd(text, 0))
+                            {
+                                string labelText = _labelFinder.FindLabel(pageWords,
+                                    cell.PdfLeft(scaleX), cell.PdfTop(scaleY),
+                                    cell.PdfRight(scaleX), cell.PdfBottom(scaleY));
 
-                            onResultFound(new ScanResult(page, qrText, labelText));
-                            foundOnPage++;
+                                onResultFound(new ScanResult(page, text, labelText));
+                            }
                         }
-                    }
+                    });
 
-                    if (foundOnPage < 56)
-                    {
-                        ScanWithGridFallback(originalImage, reader, scannedQRCodes,
-                            pageWords, scaleX, scaleY, page, onResultFound);
-                    }
+                    foreach (var cell in cells)
+                        cell.Bitmap.Dispose();
                 }
+
+                swDecode.Stop();
+
+                Debug.WriteLine($"[Page {page}] Render: {swRender.ElapsedMilliseconds}ms | Decode: {swDecode.ElapsedMilliseconds}ms | Found: {scannedQRCodes.Count}");
 
                 progress.FoundCount = scannedQRCodes.Count;
                 double scanElapsed = scanStopwatch.Elapsed.TotalSeconds;
@@ -111,105 +152,112 @@ public class QrScannerService : IQrScannerService
         }, cancellationToken);
     }
 
-    private string FindLabelFromQrResult(Result qrResult, double scaleX, double scaleY, List<WordInfo> pageWords)
+    private static Barcode[] ReadBarcodesFromBitmap(Bitmap bitmap)
     {
-        var points = qrResult.ResultPoints;
-        if (points == null || points.Length < 2)
-            return "";
+        var bitmapData = bitmap.LockBits(
+            new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+            ImageLockMode.ReadOnly,
+            PixelFormat.Format32bppArgb);
+        try
+        {
+            int byteCount = bitmapData.Stride * bitmapData.Height;
+            var pixels = new byte[byteCount];
+            Marshal.Copy(bitmapData.Scan0, pixels, 0, byteCount);
 
-        float minX = points.Min(p => p.X);
-        float maxX = points.Max(p => p.X);
-        float minY = points.Min(p => p.Y);
-        float maxY = points.Max(p => p.Y);
+            var iv = new ImageView(
+                pixels,
+                bitmapData.Width,
+                bitmapData.Height,
+                ZXingCpp.ImageFormat.BGRA,
+                bitmapData.Stride);
+
+            var reader = new BarcodeReader()
+            {
+                Formats = BarcodeFormat.QRCode,
+                TryInvert = true,
+                TextMode = TextMode.Plain,
+                MaxNumberOfSymbols = 64
+            };
+
+            return reader.From(iv);
+        }
+        finally
+        {
+            bitmap.UnlockBits(bitmapData);
+        }
+    }
+
+    private string FindLabelFromBarcode(Barcode barcode, double scaleX, double scaleY, List<WordInfo> pageWords)
+    {
+        var pos = barcode.Position;
+
+        float minX = Math.Min(Math.Min(pos.TopLeft.X, pos.TopRight.X), Math.Min(pos.BottomLeft.X, pos.BottomRight.X));
+        float maxX = Math.Max(Math.Max(pos.TopLeft.X, pos.TopRight.X), Math.Max(pos.BottomLeft.X, pos.BottomRight.X));
+        float minY = Math.Min(Math.Min(pos.TopLeft.Y, pos.TopRight.Y), Math.Min(pos.BottomLeft.Y, pos.BottomRight.Y));
+        float maxY = Math.Max(Math.Max(pos.TopLeft.Y, pos.TopRight.Y), Math.Max(pos.BottomLeft.Y, pos.BottomRight.Y));
 
         float qrWidth = maxX - minX;
         float qrHeight = maxY - minY;
         float stickerLeft = minX - qrWidth * 0.3f;
         float stickerRight = maxX + qrWidth * 0.3f;
-        float stickerTop = minY - qrHeight * 0.3f;
-        float stickerBottom = maxY + qrHeight * 0.8f;
+        float stickerTop = maxY;                    // label area starts at bottom of QR
+        float stickerBottom = maxY + qrHeight * 0.8f; // label area extends below QR
 
         return _labelFinder.FindLabel(pageWords,
             stickerLeft / scaleX, stickerTop / scaleY,
             stickerRight / scaleX, stickerBottom / scaleY);
     }
 
-    private void ScanWithGridFallback(Bitmap originalImage, BarcodeReader<Bitmap> reader,
-        HashSet<string> scannedQRCodes, List<WordInfo> pageWords,
-        double scaleX, double scaleY, int page, Action<ScanResult> onResultFound)
+    private record CellInfo(Bitmap Bitmap, int X, int Y, int Width, int Height)
     {
-        int gridRows = 8;
-        int gridCols = 7;
-        int cellWidth = originalImage.Width / gridCols;
-        int cellHeight = originalImage.Height / gridRows;
-
-        for (int row = 0; row < gridRows; row++)
-        {
-            for (int col = 0; col < gridCols; col++)
-            {
-                Rectangle cropRect = new Rectangle(
-                    col * cellWidth, row * cellHeight, cellWidth, cellHeight);
-
-                if (cropRect.Right > originalImage.Width)
-                    cropRect.Width = originalImage.Width - cropRect.X;
-                if (cropRect.Bottom > originalImage.Height)
-                    cropRect.Height = originalImage.Height - cropRect.Y;
-
-                using (Bitmap croppedImage = new Bitmap(cropRect.Width, cropRect.Height))
-                {
-                    using (Graphics g = Graphics.FromImage(croppedImage))
-                    {
-                        g.DrawImage(originalImage,
-                            new Rectangle(0, 0, cropRect.Width, cropRect.Height),
-                            cropRect, GraphicsUnit.Pixel);
-                    }
-
-                    var result = reader.Decode(croppedImage);
-                    if (result != null && scannedQRCodes.Add(result.Text))
-                    {
-                        string labelText = _labelFinder.FindLabel(pageWords,
-                            cropRect.X / scaleX, cropRect.Y / scaleY,
-                            (cropRect.X + cropRect.Width) / scaleX,
-                            (cropRect.Y + cropRect.Height) / scaleY);
-
-                        onResultFound(new ScanResult(page, result.Text, labelText));
-                    }
-                }
-            }
-        }
+        public double PdfLeft(double scaleX) => X / scaleX;
+        public double PdfTop(double scaleY) => Y / scaleY;
+        public double PdfRight(double scaleX) => (X + Width) / scaleX;
+        public double PdfBottom(double scaleY) => (Y + Height) / scaleY;
     }
 
-    private static BarcodeReader<Bitmap> CreateBarcodeReader()
+    private static List<CellInfo> PrepareCells(Bitmap originalImage)
     {
-        var reader = new BarcodeReader<Bitmap>(
-            (bitmap) =>
-            {
-                var width = bitmap.Width;
-                var height = bitmap.Height;
-                var pixels = new byte[width * height * 4];
-                var bitmapData = bitmap.LockBits(
-                    new Rectangle(0, 0, width, height),
-                    ImageLockMode.ReadOnly,
-                    PixelFormat.Format32bppArgb);
-                try
-                {
-                    Marshal.Copy(bitmapData.Scan0, pixels, 0, pixels.Length);
-                }
-                finally
-                {
-                    bitmap.UnlockBits(bitmapData);
-                }
-                return new RGBLuminanceSource(pixels, width, height, RGBLuminanceSource.BitmapFormat.BGRA32);
-            });
+        int cellWidth = originalImage.Width / GridCols;
+        int cellHeight = originalImage.Height / GridRows;
+        var cells = new List<CellInfo>(GridRows * GridCols * 2);
 
-        reader.Options = new DecodingOptions
+        AddGridCells(cells, originalImage, cellWidth, cellHeight, 0, 0);
+
+        int offsetX = cellWidth / 2;
+        int offsetY = cellHeight / 2;
+        AddGridCells(cells, originalImage, cellWidth, cellHeight, offsetX, offsetY);
+
+        return cells;
+    }
+
+    private static void AddGridCells(List<CellInfo> cells, Bitmap originalImage,
+        int cellWidth, int cellHeight, int offsetX, int offsetY)
+    {
+        int imgW = originalImage.Width;
+        int imgH = originalImage.Height;
+
+        for (int y = offsetY; y < imgH; y += cellHeight)
         {
-            TryHarder = true,
-            PossibleFormats = new List<BarcodeFormat> { BarcodeFormat.QR_CODE },
-            CharacterSet = "UTF-8",
-            TryInverted = true
-        };
+            for (int x = offsetX; x < imgW; x += cellWidth)
+            {
+                int w = Math.Min(cellWidth, imgW - x);
+                int h = Math.Min(cellHeight, imgH - y);
 
-        return reader;
+                if (w < cellWidth / 4 || h < cellHeight / 4)
+                    continue;
+
+                var cropped = new Bitmap(w, h);
+                using (var g = Graphics.FromImage(cropped))
+                {
+                    g.DrawImage(originalImage,
+                        new Rectangle(0, 0, w, h),
+                        new Rectangle(x, y, w, h),
+                        GraphicsUnit.Pixel);
+                }
+
+                cells.Add(new CellInfo(cropped, x, y, w, h));
+            }
+        }
     }
 }

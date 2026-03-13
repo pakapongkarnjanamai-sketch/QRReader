@@ -14,6 +14,7 @@
     <PackageReference Include="DevExpress.Win.PdfViewer" Version="24.2.6" />
     <PackageReference Include="ZXing.Net" Version="0.16.10" />
     <PackageReference Include="ZXing.Net.Bindings.Windows.Compatibility" Version="0.16.13" />
+    <PackageReference Include="ZXingCpp" Version="0.5.1" />
   </ItemGroup>
 
 </Project>
