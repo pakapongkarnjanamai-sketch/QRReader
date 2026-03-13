@@ -24,7 +24,6 @@ namespace PDFReaderV2
         private ToolStripStatusLabel statusLabel;
         private MenuStrip menuStrip;
         private DevExpress.XtraEditors.SplitContainerControl splitContainer;
-        private SkeletonPanel skeletonPanel;
         private HashSet<string> scannedQRCodes = new HashSet<string>();
 
         public Form1()
@@ -133,16 +132,7 @@ namespace PDFReaderV2
             };
             pdfViewer.ZoomMode = PdfZoomMode.FitToWidth;
 
-            // Skeleton Loader (overlays on grid area)
-            skeletonPanel = new SkeletonPanel
-            {
-                Dock = DockStyle.Fill,
-                Visible = false
-            };
-
-            splitContainer.Panel1.Controls.Add(skeletonPanel);
             splitContainer.Panel1.Controls.Add(gridResults);
-            skeletonPanel.BringToFront();
             splitContainer.Panel2.Controls.Add(pdfViewer);
 
             this.Controls.AddRange(new Control[] {
@@ -189,12 +179,6 @@ namespace PDFReaderV2
             gridResults.DataSource = null;
             statusLabel.Text = "Processing...";
 
-            // Show skeleton loader
-            skeletonPanel.ResetProgress();
-            skeletonPanel.Visible = true;
-            skeletonPanel.BringToFront();
-            skeletonPanel.StartAnimation();
-
             try
             {
                 await ScanQRCodeWithLabels();
@@ -209,10 +193,6 @@ namespace PDFReaderV2
             }
             finally
             {
-                // Hide skeleton loader
-                skeletonPanel.StopAnimation();
-                skeletonPanel.Visible = false;
-
                 btnProcess.Enabled = true;
             }
         }
@@ -292,10 +272,10 @@ namespace PDFReaderV2
                     for (int page = 1; page <= totalPages; page++)
                     {
                         int currentPage = page;
+                        int progressPercent = (int)((double)currentPage / totalPages * 100);
                         this.Invoke((MethodInvoker)delegate
                         {
-                            statusLabel.Text = $"Scanning page {currentPage} of {totalPages}...";
-                            skeletonPanel.UpdateProgress(currentPage, totalPages, scannedQRCodes.Count);
+                            statusLabel.Text = $"Scanning page {currentPage} / {totalPages} ({progressPercent}%) | Found: {scannedQRCodes.Count} QR codes";
                         });
 
                         PdfPage pdfPage = processor.Document.Pages[page - 1];
@@ -369,7 +349,7 @@ namespace PDFReaderV2
                                         });
                                         gridResults.DataSource = null;
                                         gridResults.DataSource = results;
-                                        skeletonPanel.UpdateProgress(currentPage, totalPages, scannedQRCodes.Count);
+                                        statusLabel.Text = $"Scanning page {currentPage} / {totalPages} | Found: {scannedQRCodes.Count} QR codes";
                                     });
                                 }
                             }
@@ -438,7 +418,7 @@ namespace PDFReaderV2
                                                     });
                                                     gridResults.DataSource = null;
                                                     gridResults.DataSource = results;
-                                                    skeletonPanel.UpdateProgress(currentPage, totalPages, scannedQRCodes.Count);
+                                                    statusLabel.Text = $"Scanning page {currentPage} / {totalPages} | Found: {scannedQRCodes.Count} QR codes";
                                                 });
                                             }
                                         }
