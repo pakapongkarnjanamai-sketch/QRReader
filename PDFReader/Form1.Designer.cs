@@ -1,4 +1,4 @@
-﻿namespace QRReader
+﻿namespace PDFReader
 {
     partial class Form1
     {

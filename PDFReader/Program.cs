@@ -1,4 +1,4 @@
-namespace QRReader
+namespace PDFReader
 {
     internal static class Program
     {

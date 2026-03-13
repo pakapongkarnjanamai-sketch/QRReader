@@ -9,7 +9,7 @@ using Point = System.Drawing.Point;
 using RadioButton = System.Windows.Forms.RadioButton;
 using Size = System.Drawing.Size;
 
-namespace QRReader
+namespace PDFReader
 
 {
     public partial class Form1 : Form
@@ -53,7 +53,7 @@ namespace QRReader
         private void InitializeControls()
         {
             this.Size = new Size(1200, 800);
-            this.Text = "QR Reader - PDF Content Scanner ";
+            this.Text = "PDF Reader - PDF Content Scanner ";
             //this.Text = "PDFScout - PDF Content Scanner";
 
             // Status Strip
