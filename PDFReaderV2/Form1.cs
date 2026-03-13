@@ -31,9 +31,12 @@ namespace PDFReaderV2
         private ManualResetEventSlim _pauseEvent = new(true);
         private bool _isPaused;
         private volatile string _stepText = "";
-        private volatile int _currentPage;
+        private volatile string _etaText = "";
+        private volatile string _avgPerPageText = "";
+        private volatile int _pagesCompleted;
         private volatile int _totalPages;
         private Stopwatch? _stopwatch;
+        private Stopwatch? _scanStopwatch;
         private System.Windows.Forms.Timer _statusTimer = null!;
 
         public Form1()
@@ -156,8 +159,8 @@ namespace PDFReaderV2
             };
             pdfViewer.ZoomMode = PdfZoomMode.FitToWidth;
 
-            splitContainer.Panel1.Controls.Add(gridResults);
-            splitContainer.Panel2.Controls.Add(pdfViewer);
+            splitContainer.Panel1.Controls.Add(pdfViewer);
+            splitContainer.Panel2.Controls.Add(gridResults);
 
             this.Controls.AddRange(new Control[] {
                 txtPdfPath, btnBrowse, btnProcess, btnPause,
@@ -203,14 +206,13 @@ namespace PDFReaderV2
             if (_stopwatch == null || _totalPages == 0) return;
 
             double elapsed = _stopwatch.Elapsed.TotalSeconds;
+            int completed = _pagesCompleted;
             string status;
 
-            if (_currentPage > 0 && _currentPage <= _totalPages)
+            if (completed > 0 && completed <= _totalPages)
             {
-                int pct = (int)((double)_currentPage / _totalPages * 100);
-                double avgPerPage = elapsed / _currentPage;
-                double eta = avgPerPage * (_totalPages - _currentPage);
-                status = $"{_stepText} {_currentPage} / {_totalPages} ({pct}%) | Found: {scannedQRCodes.Count} QR codes | Elapsed: {FormatTime(elapsed)} | ETA: {FormatTime(eta)}";
+                int pct = (int)((double)completed / _totalPages * 100);
+                status = $"{_stepText} {completed} / {_totalPages} ({pct}%) | Found: {scannedQRCodes.Count} QR codes | Avg: {_avgPerPageText}/page | Elapsed: {FormatTime(elapsed)} | ETA: {_etaText}";
             }
             else
             {
@@ -261,9 +263,10 @@ namespace PDFReaderV2
             _pauseEvent.Set();
             btnPause.Text = "Pause";
             scannedQRCodes.Clear();
-            _currentPage = 0;
+            _pagesCompleted = 0;
             _totalPages = 0;
             _stepText = "Starting...";
+            _etaText = "calculating...";
             gridResults.DataSource = null;
             statusLabel.Text = "Starting...";
 
@@ -373,11 +376,12 @@ namespace PDFReaderV2
                 };
 
                 _stepText = "Scanning page";
+                _scanStopwatch = Stopwatch.StartNew();
 
                 for (int page = 1; page <= _totalPages; page++)
                 {
                     _pauseEvent.Wait();
-                    _currentPage = page;
+                    _pagesCompleted = page;
 
                     var pdfPage = processor.Document.Pages[page - 1];
                     double pageHeight = pdfPage.CropBox.Height;
@@ -489,6 +493,14 @@ namespace PDFReaderV2
                             }
                         }
                     } // bitmap disposed here
+
+                    // Update ETA and avg speed after each page
+                    double scanElapsed = _scanStopwatch!.Elapsed.TotalSeconds;
+                    double avgPerPage = scanElapsed / page;
+                    int remaining = _totalPages - page;
+                    double eta = avgPerPage * remaining;
+                    _etaText = FormatTime(eta);
+                    _avgPerPageText = $"{avgPerPage:F1}s";
 
                     // Update grid on UI thread (only when new data found)
                     if (foundNewOnThisPage)
